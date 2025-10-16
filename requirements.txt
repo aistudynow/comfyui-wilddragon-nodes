@@ -1,0 +1,14 @@
+# Core (kept lean)
+insightface>=0.7.3
+onnxruntime>=1.22
+numpy>=1.24
+Pillow>=10.2
+torch>=2.1
+torchvision>=0.16
+
+
+# Optional (enable in Part 2)
+# retina-face>=0.0.16 # serengil/retinaface (TensorFlow backend)
+# opencv-python>=4.8 # only if you want OpenCV utilities later
+retina-face>=0.0.16
+opencv-python-headless>=4.8
