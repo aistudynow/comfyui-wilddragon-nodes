@@ -35,6 +35,17 @@ class WD_FaceRestoreBlend:
                 "feather_amount": ("INT", {"default": 15, "min": 0, "max": 100, "step": 1}),
                 "color_match": ("BOOLEAN", {"default": True, "label_on": "match", "label_off": "no match"}),
             },
+            "optional": {
+                "faithdiff_checkpoint_path": ("STRING", {"default": "", "multiline": False}),
+                "faithdiff_base_model_dir": ("STRING", {"default": "", "multiline": False}),
+                "faithdiff_vae_dir": ("STRING", {"default": "", "multiline": False}),
+                "faithdiff_basic_pipe": ("BASIC_PIPE",),
+                "faithdiff_model": ("MODEL",),
+                "faithdiff_clip": ("CLIP",),
+                "faithdiff_vae": ("VAE",),
+                "faithdiff_text_encoder": ("MODEL",),
+                "faithdiff_text_encoder_2": ("MODEL",),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -45,14 +56,34 @@ class WD_FaceRestoreBlend:
     def __init__(self):
         self._restoration_model = None
         self._model_type = None
+        self._faithdiff_signature = None
 
-    def _load_restoration_model(self, model_name: str):
+    def _signature_value(self, value):
+        if isinstance(value, (str, bytes, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, (list, tuple)):
+            return tuple(self._signature_value(v) for v in value)
+        return id(value)
+
+    def _load_restoration_model(self, model_name: str, faithdiff_options: dict | None = None):
         """Load face restoration model on demand."""
         if model_name == "none":
             return None
 
         if self._model_type == model_name and self._restoration_model is not None:
-            return self._restoration_model
+            if model_name != "faithdiff":
+                return self._restoration_model
+
+            signature = None
+            if faithdiff_options:
+                signature = tuple(
+                    sorted((key, self._signature_value(val)) for key, val in faithdiff_options.items())
+                )
+            if signature == self._faithdiff_signature:
+                return self._restoration_model
+
+        if model_name != "faithdiff":
+            self._faithdiff_signature = None
 
         print(f"[Face Restore & Blend] Loading {model_name} model...")
 
@@ -121,8 +152,13 @@ class WD_FaceRestoreBlend:
                 try:
                     from .faithdiff_wrapper import FaithDiffRestorer
 
-                    self._restoration_model = FaithDiffRestorer()
+                    faithdiff_options = faithdiff_options or {}
+                    signature = tuple(
+                        sorted((key, self._signature_value(val)) for key, val in faithdiff_options.items())
+                    ) if faithdiff_options else None
+                    self._restoration_model = FaithDiffRestorer(**faithdiff_options)
                     self._model_type = model_name
+                    self._faithdiff_signature = signature
                     print("[Face Restore & Blend] FaithDiff loaded successfully")
                 except ImportError as e:
                     print(f"[Face Restore & Blend] FaithDiff not available: {e}")
@@ -130,6 +166,7 @@ class WD_FaceRestoreBlend:
                     return None
                 except Exception as e:
                     print(f"[Face Restore & Blend] FaithDiff loading error: {e}")
+                    self._faithdiff_signature = None
                     return None
 
         except Exception as e:
@@ -138,12 +175,19 @@ class WD_FaceRestoreBlend:
 
         return self._restoration_model
 
-    def _enhance_face(self, face_pil: Image.Image, model_name: str, strength: float) -> Image.Image:
+    def _enhance_face(
+        self,
+        face_pil: Image.Image,
+        model_name: str,
+        strength: float,
+        faithdiff_options: dict | None = None,
+    ) -> Image.Image:
         """Apply face restoration to a single face image."""
         if model_name == "none":
             return face_pil
 
-        model = self._load_restoration_model(model_name)
+        options_copy = dict(faithdiff_options) if faithdiff_options is not None else None
+        model = self._load_restoration_model(model_name, options_copy)
         if model is None:
             print("[Face Restore & Blend] Model not available, returning original")
             return face_pil
@@ -302,6 +346,15 @@ class WD_FaceRestoreBlend:
         blend_strength: float,
         feather_amount: int,
         color_match: bool,
+        faithdiff_checkpoint_path: str = "",
+        faithdiff_base_model_dir: str = "",
+        faithdiff_vae_dir: str = "",
+        faithdiff_basic_pipe=None,
+        faithdiff_model=None,
+        faithdiff_clip=None,
+        faithdiff_vae=None,
+        faithdiff_text_encoder=None,
+        faithdiff_text_encoder_2=None,
     ):
         B_orig, H_orig, W_orig, C_orig = original_images.shape
         B_crop = cropped_faces.shape[0]
@@ -322,6 +375,41 @@ class WD_FaceRestoreBlend:
 
         print(f"[Face Restore & Blend] Processing {B_orig} frames with model: {restoration_model}")
 
+        faithdiff_options = {}
+
+        def _set_option(key, value, *, override=True):
+            if value is None:
+                return
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    return
+            if not override and key in faithdiff_options:
+                return
+            faithdiff_options[key] = value
+
+        _set_option("model_path", faithdiff_checkpoint_path)
+        _set_option("base_model_path", faithdiff_base_model_dir)
+        _set_option("vae_path", faithdiff_vae_dir)
+        _set_option("model", faithdiff_model)
+        _set_option("clip", faithdiff_clip)
+        _set_option("vae", faithdiff_vae)
+        _set_option("text_encoder", faithdiff_text_encoder)
+        _set_option("text_encoder_2", faithdiff_text_encoder_2)
+
+        if faithdiff_basic_pipe is not None:
+            try:
+                pipe_model, pipe_clip, pipe_vae, _, _ = faithdiff_basic_pipe
+                _set_option("basic_pipe", faithdiff_basic_pipe)
+                _set_option("model", pipe_model, override=False)
+                _set_option("clip", pipe_clip, override=False)
+                _set_option("vae", pipe_vae, override=False)
+            except Exception as exc:
+                print(f"[Face Restore & Blend] Invalid FaithDiff basic pipe input: {exc}")
+
+        if not faithdiff_options:
+            faithdiff_options = None
+
         result_frames = []
 
         for i in range(B_orig):
@@ -333,7 +421,8 @@ class WD_FaceRestoreBlend:
 
             # Enhance face
             if restoration_model != "none":
-                enhanced_face = self._enhance_face(face_pil, restoration_model, restoration_strength)
+                options = faithdiff_options if restoration_model == "faithdiff" else None
+                enhanced_face = self._enhance_face(face_pil, restoration_model, restoration_strength, options)
             else:
                 enhanced_face = face_pil
 
