@@ -1,14 +1,6 @@
 # wilddragon_nodes/image/face_crop_2025.py
 # Node: 🐉 Image Face Crop (2025)
 
-# --- sys.path guard for hyphenated folder names ---
-import os, sys
-_here = os.path.dirname(__file__)
-_pkg_root = os.path.abspath(os.path.join(_here, "..", ".."))
-if _pkg_root not in sys.path:
-    sys.path.insert(0, _pkg_root)
-# --------------------------------------------------
-
 import json
 from typing import List, Tuple
 
@@ -18,7 +10,7 @@ from PIL import Image, ImageFilter
 import torch
 from torchvision.transforms.v2 import ToTensor, ToPILImage
 
-from wilddragon_nodes.utils.face_detectors import (
+from ..utils.face_detectors import (
     get_detector,
     expand_bbox,
     eye_rotation_radians_from_kps,
@@ -53,6 +45,8 @@ class WD_ImageFaceCrop2025:
                 "mask_space": (["crop", "original"], {"default": "crop"}),
                 "mask_feather": ("INT", {"default": 8, "min": 0, "max": 128, "step": 1}),
                 "min_score": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "batch_size": ("INT", {"default": 8, "min": 1, "max": 32, "step": 1}),
+                "cache_detections": ("BOOLEAN", {"default": True, "label_on": "yes", "label_off": "no"}),
             },
         }
 
@@ -99,6 +93,37 @@ class WD_ImageFaceCrop2025:
 
     # -------------------- execute --------------------
 
+    def __init__(self):
+        self._detection_cache = {}
+        self._last_bbox = None
+
+    def _process_frame_fast(self, pil_img: Image.Image, box: Tuple[int, int, int, int],
+                            crop_width: int, crop_height: int, align_rotation: bool,
+                            target_aspect: float, kps=None) -> Image.Image:
+        x1, y1, x2, y2 = box
+        patch = pil_img.crop((x1, y1, x2, y2))
+
+        if align_rotation and kps is not None:
+            angle_rad = eye_rotation_radians_from_kps(kps)
+            angle_deg = float(np.degrees(angle_rad))
+            if abs(angle_deg) > 0.5:
+                rotated = patch.rotate(-angle_deg, resample=Image.BICUBIC, expand=True)
+                rw, rh = rotated.size
+                if (rw / rh) > target_aspect:
+                    ch = rh
+                    cw = int(round(target_aspect * ch))
+                else:
+                    cw = rw
+                    ch = int(round(cw / target_aspect))
+                cx, cy = rw // 2, rh // 2
+                rx1 = max(0, cx - cw // 2)
+                ry1 = max(0, cy - ch // 2)
+                rx2 = min(rw, rx1 + cw)
+                ry2 = min(rh, ry1 + ch)
+                patch = rotated.crop((rx1, ry1, rx2, ry2))
+
+        return patch.resize((crop_width, crop_height), Image.Resampling.LANCZOS)
+
     def execute(
         self,
         images: torch.Tensor,
@@ -113,76 +138,70 @@ class WD_ImageFaceCrop2025:
         mask_space: str,
         mask_feather: int,
         min_score: float,
+        batch_size: int,
+        cache_detections: bool,
     ):
-        # images: [B, H, W, C], float 0..1
         B, H, W, C = images.shape
         target_aspect = float(crop_width) / float(crop_height)
-
-        # Create detector (auto safely falls back)
         detector = get_detector(backend)
 
         out_images: List[torch.Tensor] = []
         out_masks: List[torch.Tensor] = []
         all_boxes: List[Tuple[int, int, int, int]] = []
 
+        print(f"Processing {B} frames with face detection...")
+
+        cache_key = f"{backend}_{W}_{H}_{min_score}"
+        use_cached = cache_detections and cache_key in self._detection_cache and self._last_bbox is not None
+
         for b in range(B):
-            pil = _to_image(images[b].permute(2, 0, 1))  # CHW -> PIL
-            try:
-                raw_dets = detector.detect(pil)
-            except Exception:
-                raw_dets = []
+            pil = _to_image(images[b].permute(2, 0, 1))
 
-            dets = [d for d in raw_dets if float(d.get("score", 1.0)) >= float(min_score)]
-            selected = self._select_faces(dets, selection, index, max_faces)
+            if use_cached and b % 5 != 0:
+                box = self._last_bbox
+                kps = None
+            else:
+                try:
+                    raw_dets = detector.detect(pil)
+                except Exception:
+                    raw_dets = []
 
-            if not selected:
-                blank = Image.new("RGB", (crop_width, crop_height), color=(0, 0, 0))
-                out_images.append(_to_tensor(blank))
-                out_masks.append(torch.zeros((crop_height, crop_width), dtype=torch.float32))
-                all_boxes.append((0, 0, 0, 0))
-                continue
+                dets = [d for d in raw_dets if float(d.get("score", 1.0)) >= float(min_score)]
+                selected = self._select_faces(dets, selection, index, max_faces)
 
-            for det in selected:
+                if not selected:
+                    blank = Image.new("RGB", (crop_width, crop_height), color=(0, 0, 0))
+                    out_images.append(_to_tensor(blank))
+                    out_masks.append(torch.zeros((crop_height, crop_width), dtype=torch.float32))
+                    all_boxes.append((0, 0, 0, 0))
+                    continue
+
+                det = selected[0]
                 box = expand_bbox(tuple(det["bbox"]), margin, target_aspect, W, H)
-                x1, y1, x2, y2 = box
-                patch = pil.crop((x1, y1, x2, y2))
+                kps = det.get("kps")
+                self._last_bbox = box
 
-                if align_rotation:
-                    angle_rad = eye_rotation_radians_from_kps(det.get("kps"))
-                    angle_deg = float(np.degrees(angle_rad))
-                    rotated = patch.rotate(-angle_deg, resample=Image.BICUBIC, expand=True)
+            cropped = self._process_frame_fast(pil, box, crop_width, crop_height,
+                                                align_rotation, target_aspect, kps)
+            out_images.append(_to_tensor(cropped))
 
-                    rw, rh = rotated.size
-                    r_aspect = target_aspect
-                    if (rw / rh) > r_aspect:
-                        ch = rh
-                        cw = int(round(r_aspect * ch))
-                    else:
-                        cw = rw
-                        ch = int(round(cw / r_aspect))
-                    cx, cy = rw // 2, rh // 2
-                    rx1 = max(0, cx - cw // 2)
-                    ry1 = max(0, cy - ch // 2)
-                    rx2 = min(rw, rx1 + cw)
-                    ry2 = min(rh, ry1 + ch)
-                    patch = rotated.crop((rx1, ry1, rx2, ry2))
+            if mask_space == "original":
+                mask = self._build_mask_original(W, H, box, mask_feather)
+            else:
+                mask = self._build_mask_crop(crop_width, crop_height, mask_feather)
+            out_masks.append(mask)
+            all_boxes.append(box)
 
-                patch = patch.resize((crop_width, crop_height), Image.Resampling.LANCZOS)
+            if b % 30 == 0:
+                print(f"  Processed {b}/{B} frames")
 
-                out_images.append(_to_tensor(patch))
+        if cache_detections:
+            self._detection_cache[cache_key] = True
 
-                if mask_space == "original":
-                    mask = self._build_mask_original(W, H, box, mask_feather)
-                else:
-                    mask = self._build_mask_crop(crop_width, crop_height, mask_feather)
-                out_masks.append(mask)
-                all_boxes.append(box)
-
-        # Stack to ComfyUI format
-        img_batch = torch.stack(out_images, dim=0).permute(0, 2, 3, 1)  # [N, h, w, c]
-        mask_batch = torch.stack(out_masks, dim=0)                       # [N, H, W] or [N, h, w]
-
+        img_batch = torch.stack(out_images, dim=0).permute(0, 2, 3, 1)
+        mask_batch = torch.stack(out_masks, dim=0)
         face_found = any((x2 - x1) > 0 and (y2 - y1) > 0 for (x1, y1, x2, y2) in all_boxes)
         bboxes_json = json.dumps(all_boxes)
 
+        print(f"Completed processing {B} frames. Faces detected: {face_found}")
         return (img_batch[:, :, :, :3], mask_batch, face_found, bboxes_json)

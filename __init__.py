@@ -1,13 +1,8 @@
 # comfyui-wilddragon-nodes/__init__.py
 # Robust import even if the folder has hyphens in its name.
 
-import os, sys
-_pkg_dir = os.path.dirname(__file__)
-if _pkg_dir not in sys.path:
-    sys.path.insert(0, _pkg_dir)
-
 try:
-    from wilddragon_nodes.image.face_crop_2025 import WD_ImageFaceCrop2025
+    from .image.face_crop_2025 import WD_ImageFaceCrop2025
 except Exception as _import_err:
     # Fallback shim node that surfaces the import error in UI
     _ERR = repr(_import_err)

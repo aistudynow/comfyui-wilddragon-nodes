@@ -37,9 +37,9 @@ class InsightFaceDetector(BaseFaceDetector):
 
         self.app = FaceAnalysis(providers=providers, root=models_root)
         try:
-            self.app.prepare(ctx_id=0, det_size=(640, 640))  # try GPU
+            self.app.prepare(ctx_id=0, det_size=(320, 320))
         except Exception:
-            self.app.prepare(ctx_id=-1, det_size=(640, 640))  # fallback CPU
+            self.app.prepare(ctx_id=-1, det_size=(320, 320))
 
     def detect(self, image: Image.Image) -> List[Dict[str, Any]]:
         im_np = np.array(image.convert("RGB"))
