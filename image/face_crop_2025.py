@@ -45,8 +45,8 @@ class WD_ImageFaceCrop2025:
                 "mask_space": (["crop", "original"], {"default": "crop"}),
                 "mask_feather": ("INT", {"default": 8, "min": 0, "max": 128, "step": 1}),
                 "min_score": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "batch_size": ("INT", {"default": 8, "min": 1, "max": 32, "step": 1}),
-                "cache_detections": ("BOOLEAN", {"default": True, "label_on": "yes", "label_off": "no"}),
+                "detect_interval": ("INT", {"default": 10, "min": 1, "max": 60, "step": 1}),
+                "use_gpu": ("BOOLEAN", {"default": True, "label_on": "GPU", "label_off": "CPU"}),
             },
         }
 
@@ -75,7 +75,35 @@ class WD_ImageFaceCrop2025:
         arr = np.asarray(base, dtype=np.float32) / 255.0
         return torch.from_numpy(arr)
 
-    def _select_faces(self, dets: List[dict], selection: str, index: int, max_faces: int) -> List[dict]:
+    def _compute_bbox_center(self, bbox: list) -> Tuple[float, float]:
+        """Compute the center of a bounding box."""
+        x1, y1, x2, y2 = bbox
+        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+    def _bbox_distance(self, bbox1: list, bbox2: list) -> float:
+        """Compute Euclidean distance between centers of two bboxes."""
+        cx1, cy1 = self._compute_bbox_center(bbox1)
+        cx2, cy2 = self._compute_bbox_center(bbox2)
+        return np.sqrt((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2)
+
+    def _match_face_to_reference(self, dets: List[dict]) -> int:
+        """Find the face that best matches the reference face based on spatial position."""
+        if not dets or self._reference_face is None:
+            return 0
+
+        ref_bbox = self._reference_face["bbox"]
+        min_dist = float('inf')
+        best_idx = 0
+
+        for i, det in enumerate(dets):
+            dist = self._bbox_distance(ref_bbox, det["bbox"])
+            if dist < min_dist:
+                min_dist = dist
+                best_idx = i
+
+        return best_idx
+
+    def _select_faces(self, dets: List[dict], selection: str, index: int, max_faces: int, is_first_frame: bool = False) -> List[dict]:
         if not dets:
             return []
         if selection == "largest":
@@ -85,8 +113,16 @@ class WD_ImageFaceCrop2025:
             dets = sorted(dets, key=lambda d: -float(d.get("score", 0.0)))
             return dets[:max_faces]
         elif selection == "index":
-            idx = max(0, min(index, len(dets) - 1))
-            return [dets[idx]]
+            if is_first_frame:
+                # First frame: select by index and store as reference
+                idx = max(0, min(index, len(dets) - 1))
+                self._reference_face = dets[idx]
+                return [dets[idx]]
+            else:
+                # Subsequent frames: match to reference face
+                matched_idx = self._match_face_to_reference(dets)
+                self._reference_face = dets[matched_idx]  # Update reference for next frame
+                return [dets[matched_idx]]
         elif selection == "all":
             return dets[:max_faces]
         return dets[:max_faces]
@@ -96,6 +132,8 @@ class WD_ImageFaceCrop2025:
     def __init__(self):
         self._detection_cache = {}
         self._last_bbox = None
+        self._reference_face = None  # Store reference face for tracking
+        self._reference_embedding = None  # Store embedding if available
 
     def _process_frame_fast(self, pil_img: Image.Image, box: Tuple[int, int, int, int],
                             crop_width: int, crop_height: int, align_rotation: bool,
@@ -138,12 +176,12 @@ class WD_ImageFaceCrop2025:
         mask_space: str,
         mask_feather: int,
         min_score: float,
-        batch_size: int,
-        cache_detections: bool,
+        detect_interval: int,
+        use_gpu: bool,
     ):
         B, H, W, C = images.shape
         target_aspect = float(crop_width) / float(crop_height)
-        detector = get_detector(backend)
+        detector = get_detector(backend, use_gpu=use_gpu)
 
         out_images: List[torch.Tensor] = []
         out_masks: List[torch.Tensor] = []
@@ -151,13 +189,15 @@ class WD_ImageFaceCrop2025:
 
         print(f"Processing {B} frames with face detection...")
 
-        cache_key = f"{backend}_{W}_{H}_{min_score}"
-        use_cached = cache_detections and cache_key in self._detection_cache and self._last_bbox is not None
+        # Reset reference face for new sequence
+        self._reference_face = None
 
         for b in range(B):
             pil = _to_image(images[b].permute(2, 0, 1))
+            is_first_frame = (b == 0)
 
-            if use_cached and b % 5 != 0:
+            # Segmented attention: only run detection every N frames
+            if b > 0 and b % detect_interval != 0 and self._last_bbox is not None:
                 box = self._last_bbox
                 kps = None
             else:
@@ -167,7 +207,7 @@ class WD_ImageFaceCrop2025:
                     raw_dets = []
 
                 dets = [d for d in raw_dets if float(d.get("score", 1.0)) >= float(min_score)]
-                selected = self._select_faces(dets, selection, index, max_faces)
+                selected = self._select_faces(dets, selection, index, max_faces, is_first_frame)
 
                 if not selected:
                     blank = Image.new("RGB", (crop_width, crop_height), color=(0, 0, 0))
@@ -194,9 +234,6 @@ class WD_ImageFaceCrop2025:
 
             if b % 30 == 0:
                 print(f"  Processed {b}/{B} frames")
-
-        if cache_detections:
-            self._detection_cache[cache_key] = True
 
         img_batch = torch.stack(out_images, dim=0).permute(0, 2, 3, 1)
         mask_batch = torch.stack(out_masks, dim=0)

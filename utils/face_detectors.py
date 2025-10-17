@@ -26,20 +26,34 @@ class BaseFaceDetector:
 # ---------------------------------------------------------------------------
 
 class InsightFaceDetector(BaseFaceDetector):
-    def __init__(self, providers: Optional[List[str]] = None):
+    def __init__(self, providers: Optional[List[str]] = None, use_gpu: bool = True):
         # Lazy import to avoid heavy module load at package import time
         from insightface.app import FaceAnalysis  # type: ignore
+        import torch
+
         models_root = os.path.join(folder_paths.models_dir, "insightface")
         os.makedirs(models_root, exist_ok=True)
 
+        # Force GPU if available
         if providers is None:
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if use_gpu and torch.cuda.is_available():
+                providers = ["CUDAExecutionProvider"]
+                print("[InsightFace] Using GPU (CUDA) for face detection")
+            else:
+                providers = ["CPUExecutionProvider"]
+                print("[InsightFace] Using CPU for face detection")
 
         self.app = FaceAnalysis(providers=providers, root=models_root)
+
+        # Use GPU context if available, larger det_size for better accuracy
+        ctx_id = 0 if (use_gpu and torch.cuda.is_available()) else -1
         try:
-            self.app.prepare(ctx_id=0, det_size=(320, 320))
+            self.app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         except Exception:
-            self.app.prepare(ctx_id=-1, det_size=(320, 320))
+            try:
+                self.app.prepare(ctx_id=ctx_id, det_size=(320, 320))
+            except Exception:
+                self.app.prepare(ctx_id=-1, det_size=(320, 320))
 
     def detect(self, image: Image.Image) -> List[Dict[str, Any]]:
         im_np = np.array(image.convert("RGB"))
@@ -113,23 +127,28 @@ _DETECTORS = {
     "retinaface": RetinaFaceDetector,
 }
 
-def get_detector(name: str, **kwargs) -> BaseFaceDetector:
+def get_detector(name: str, use_gpu: bool = True, **kwargs) -> BaseFaceDetector:
     """
     name:
       - 'auto': try insightface then retinaface
       - 'insightface'
       - 'retinaface'
+    use_gpu: Force GPU usage if available (default: True)
     """
     name = (name or "insightface").lower()
     if name == "auto":
         for cand in ("insightface", "retinaface"):
             try:
+                if cand == "insightface":
+                    return _DETECTORS[cand](use_gpu=use_gpu, **kwargs)
                 return _DETECTORS[cand](**kwargs)
             except Exception:
                 continue
         raise RuntimeError("No face detector backends available. Install 'insightface' or 'retina-face'.")
     if name not in _DETECTORS:
         raise ValueError(f"Detector '{name}' not available.")
+    if name == "insightface":
+        return _DETECTORS[name](use_gpu=use_gpu, **kwargs)
     return _DETECTORS[name](**kwargs)
 
 
