@@ -6,6 +6,7 @@ try:
     from .image.person_selector import WD_PersonSelector
     from .image.pose_face_filter import WD_PoseFaceFilter
     from .image.person_bbox_tracker import WD_PersonBBoxTracker
+    from .image.face_restore_blend import WD_FaceRestoreBlend
     _import_success = True
 except Exception as _import_err:
     # Fallback shim node that surfaces the import error in UI
@@ -60,11 +61,24 @@ except Exception as _import_err:
         def echo(self, error):
             return (error,)
 
+    class WD_FaceRestoreBlend:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {"error": ("STRING", {"default": _ERR, "multiline": True})}}
+
+        RETURN_TYPES = ("STRING",)
+        FUNCTION = "echo"
+        CATEGORY = "Wilddragon/Errors"
+
+        def echo(self, error):
+            return (error,)
+
 NODE_CLASS_MAPPINGS = {
     "WD_ImageFaceCrop2025": WD_ImageFaceCrop2025,
     "WD_PersonSelector": WD_PersonSelector,
     "WD_PoseFaceFilter": WD_PoseFaceFilter,
     "WD_PersonBBoxTracker": WD_PersonBBoxTracker,
+    "WD_FaceRestoreBlend": WD_FaceRestoreBlend,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -72,6 +86,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WD_PersonSelector": "🐉 Person Selector",
     "WD_PoseFaceFilter": "🐉 Pose Face Filter",
     "WD_PersonBBoxTracker": "🐉 Person BBox Tracker",
+    "WD_FaceRestoreBlend": "🐉 Face Restore & Blend",
 }
 
-__all__ = ["WD_ImageFaceCrop2025", "WD_PersonSelector", "WD_PoseFaceFilter", "WD_PersonBBoxTracker"]
+__all__ = ["WD_ImageFaceCrop2025", "WD_PersonSelector", "WD_PoseFaceFilter", "WD_PersonBBoxTracker", "WD_FaceRestoreBlend"]

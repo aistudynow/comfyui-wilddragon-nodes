@@ -12,3 +12,9 @@ torchvision>=0.16
 # opencv-python>=4.8 # only if you want OpenCV utilities later
 retina-face>=0.0.16
 opencv-python-headless>=4.8
+
+# Face Restoration (optional - install as needed)
+# basicsr>=1.4.2 # required for CodeFormer and RealESRGAN
+# realesrgan>=0.3.0 # RealESRGAN upscaling
+# gfpgan>=1.3.8 # GFPGAN face restoration
+# facexlib>=0.3.0 # face utilities for restoration models

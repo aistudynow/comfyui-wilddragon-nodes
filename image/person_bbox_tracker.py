@@ -25,7 +25,8 @@ class WD_PersonBBoxTracker:
                 "images": ("IMAGE",),
                 "selected_bbox": ("BBOX",),
                 "expansion_factor": ("FLOAT", {"default": 1.5, "min": 1.0, "max": 3.0, "step": 0.1}),
-                "min_size": ("INT", {"default": 512, "min": 256, "max": 2048, "step": 64}),
+                "min_width": ("INT", {"default": 512, "min": 256, "max": 2048, "step": 64}),
+                "min_height": ("INT", {"default": 512, "min": 256, "max": 2048, "step": 64}),
             },
         }
 
@@ -60,7 +61,7 @@ class WD_PersonBBoxTracker:
         """Make dimensions even (required by many video codecs)."""
         return (w // 2) * 2, (h // 2) * 2
 
-    def execute(self, images, selected_bbox, expansion_factor, min_size):
+    def execute(self, images, selected_bbox, expansion_factor, min_width, min_height):
         B, H, W, C = images.shape
 
         # Extract bbox
@@ -92,9 +93,11 @@ class WD_PersonBBoxTracker:
         crop_h = crop_y2 - crop_y1
 
         # Ensure minimum size
-        if crop_w < min_size or crop_h < min_size:
-            # Scale up to min_size while maintaining aspect ratio
-            scale = max(min_size / crop_w, min_size / crop_h)
+        scale_w = min_width / crop_w if crop_w < min_width else 1.0
+        scale_h = min_height / crop_h if crop_h < min_height else 1.0
+
+        if scale_w > 1.0 or scale_h > 1.0:
+            scale = max(scale_w, scale_h)
             crop_w = int(crop_w * scale)
             crop_h = int(crop_h * scale)
 
