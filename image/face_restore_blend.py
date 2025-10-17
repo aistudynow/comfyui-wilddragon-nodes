@@ -28,7 +28,7 @@ class WD_FaceRestoreBlend:
                 "cropped_faces": ("IMAGE",),
                 "face_mask": ("MASK",),
                 "bboxes_json": ("STRING", {"default": ""}),
-                "restoration_model": (["none", "codeformer", "gfpgan", "realesrgan"], {"default": "none"}),
+                "restoration_model": (["none", "codeformer", "gfpgan", "realesrgan", "faithdiff"], {"default": "none"}),
                 "restoration_strength": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "blend_mode": (["alpha", "poisson", "feather"], {"default": "feather"}),
                 "blend_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
@@ -117,6 +117,21 @@ class WD_FaceRestoreBlend:
                     print("[Face Restore & Blend] RealESRGAN not available. Install with: pip install realesrgan")
                     return None
 
+            elif model_name == "faithdiff":
+                try:
+                    from .faithdiff_wrapper import FaithDiffRestorer
+
+                    self._restoration_model = FaithDiffRestorer()
+                    self._model_type = model_name
+                    print("[Face Restore & Blend] FaithDiff loaded successfully")
+                except ImportError as e:
+                    print(f"[Face Restore & Blend] FaithDiff not available: {e}")
+                    print("Install dependencies: pip install diffusers transformers accelerate")
+                    return None
+                except Exception as e:
+                    print(f"[Face Restore & Blend] FaithDiff loading error: {e}")
+                    return None
+
         except Exception as e:
             print(f"[Face Restore & Blend] Error loading model: {e}")
             return None
@@ -153,8 +168,17 @@ class WD_FaceRestoreBlend:
             elif model_name == "realesrgan":
                 restored_bgr, _ = model.enhance(face_bgr, outscale=1)
 
-            restored_rgb = cv2.cvtColor(restored_bgr, cv2.COLOR_BGR2RGB)
-            restored_pil = Image.fromarray(restored_rgb)
+            elif model_name == "faithdiff":
+                restored_rgb = model.restore(face_pil, strength)
+                restored_bgr = None
+
+            if restored_bgr is not None:
+                restored_rgb = cv2.cvtColor(restored_bgr, cv2.COLOR_BGR2RGB)
+                restored_pil = Image.fromarray(restored_rgb)
+            elif restored_rgb is not None:
+                restored_pil = Image.fromarray(restored_rgb) if isinstance(restored_rgb, np.ndarray) else restored_rgb
+            else:
+                return face_pil
 
             # Blend with original based on strength
             if strength < 1.0:
