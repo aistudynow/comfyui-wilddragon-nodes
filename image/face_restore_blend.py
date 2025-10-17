@@ -2,6 +2,7 @@
 # Node: 🐉 Face Restore & Blend
 
 import json
+import os
 import numpy as np
 import torch
 from PIL import Image, ImageFilter
@@ -92,7 +93,17 @@ class WD_FaceRestoreBlend:
                 try:
                     from basicsr.archs.rrdbnet_arch import RRDBNet
                     from realesrgan import RealESRGANer
-                    from codeformer import CodeFormer
+
+                    # Try to import CodeFormer architecture
+                    try:
+                        from codeformer import CodeFormer
+                    except:
+                        # Fallback to direct implementation
+                        import sys
+                        sys.path.append('/path/to/CodeFormer')  # Update this path
+                        from basicsr.archs.codeformer_arch import CodeFormer
+
+                    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
                     # Initialize CodeFormer
                     net = CodeFormer(
@@ -101,51 +112,92 @@ class WD_FaceRestoreBlend:
                         n_head=8,
                         n_layers=9,
                         connect_list=['32', '64', '128', '256']
-                    ).eval()
+                    ).to(device).eval()
+
+                    # Try to load pretrained weights if available
+                    try:
+                        import folder_paths
+                        model_dir = folder_paths.models_dir
+                        checkpoint_path = f"{model_dir}/codeformer/codeformer.pth"
+                        if os.path.exists(checkpoint_path):
+                            checkpoint = torch.load(checkpoint_path, map_location=device)
+                            net.load_state_dict(checkpoint['params_ema'] if 'params_ema' in checkpoint else checkpoint)
+                            print(f"[Face Restore & Blend] Loaded CodeFormer weights from {checkpoint_path}")
+                    except Exception as e:
+                        print(f"[Face Restore & Blend] Warning: Could not load CodeFormer weights: {e}")
 
                     self._restoration_model = net
                     self._model_type = model_name
                     print("[Face Restore & Blend] CodeFormer loaded successfully")
-                except ImportError:
-                    print("[Face Restore & Blend] CodeFormer not available. Install with: pip install codeformer")
+                except ImportError as e:
+                    print(f"[Face Restore & Blend] CodeFormer not available: {e}")
+                    print("Install with: pip install basicsr realesrgan")
                     return None
 
             elif model_name == "gfpgan":
                 try:
                     from gfpgan import GFPGANer
+                    import folder_paths
+
+                    model_dir = folder_paths.models_dir
+                    model_path = f"{model_dir}/gfpgan/GFPGANv1.4.pth"
+
+                    if not os.path.exists(model_path):
+                        print(f"[Face Restore & Blend] GFPGAN model not found at {model_path}")
+                        print("Download from: https://github.com/TencentARC/GFPGAN/releases")
+                        return None
 
                     self._restoration_model = GFPGANer(
-                        model_path='GFPGANv1.4.pth',
+                        model_path=model_path,
                         upscale=1,
                         arch='clean',
                         channel_multiplier=2,
-                        bg_upsampler=None
+                        bg_upsampler=None,
+                        device='cuda' if torch.cuda.is_available() else 'cpu'
                     )
                     self._model_type = model_name
                     print("[Face Restore & Blend] GFPGAN loaded successfully")
                 except ImportError:
-                    print("[Face Restore & Blend] GFGAN not available. Install with: pip install gfpgan")
+                    print("[Face Restore & Blend] GFPGAN not available. Install with: pip install gfpgan")
+                    return None
+                except Exception as e:
+                    print(f"[Face Restore & Blend] GFPGAN loading error: {e}")
                     return None
 
             elif model_name == "realesrgan":
                 try:
                     from basicsr.archs.rrdbnet_arch import RRDBNet
                     from realesrgan import RealESRGANer
+                    import folder_paths
+
+                    model_dir = folder_paths.models_dir
+                    model_path = f"{model_dir}/upscale_models/RealESRGAN_x2plus.pth"
+
+                    if not os.path.exists(model_path):
+                        print(f"[Face Restore & Blend] RealESRGAN model not found at {model_path}")
+                        print("Download from: https://github.com/xinntao/Real-ESRGAN/releases")
+                        return None
 
                     model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+                    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
                     self._restoration_model = RealESRGANer(
                         scale=2,
-                        model_path='RealESRGAN_x2plus.pth',
+                        model_path=model_path,
                         model=model,
-                        tile=0,
+                        tile=512,
                         tile_pad=10,
                         pre_pad=0,
-                        half=False
+                        half=True if device == 'cuda' else False,
+                        device=device
                     )
                     self._model_type = model_name
                     print("[Face Restore & Blend] RealESRGAN loaded successfully")
                 except ImportError:
-                    print("[Face Restore & Blend] RealESRGAN not available. Install with: pip install realesrgan")
+                    print("[Face Restore & Blend] RealESRGAN not available. Install with: pip install realesrgan basicsr")
+                    return None
+                except Exception as e:
+                    print(f"[Face Restore & Blend] RealESRGAN loading error: {e}")
                     return None
 
             elif model_name == "faithdiff":
@@ -194,35 +246,45 @@ class WD_FaceRestoreBlend:
 
         try:
             face_np = np.array(face_pil)
-            face_bgr = cv2.cvtColor(face_np, cv2.COLOR_RGB2BGR)
 
             if model_name == "codeformer":
+                face_bgr = cv2.cvtColor(face_np, cv2.COLOR_RGB2BGR)
                 # CodeFormer expects normalized tensor input
-                face_tensor = torch.from_numpy(face_bgr).float() / 255.0
-                face_tensor = face_tensor.permute(2, 0, 1).unsqueeze(0)
+                face_tensor = torch.from_numpy(face_bgr).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+                face_tensor = face_tensor.to(next(model.parameters()).device)
 
                 with torch.no_grad():
-                    output = model(face_tensor, w=strength)[0]
+                    output = model(face_tensor, w=strength, adain=True)[0]
 
-                restored_bgr = (output.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-
-            elif model_name == "gfpgan":
-                _, _, restored_bgr = model.enhance(face_bgr, has_aligned=False, paste_back=True, weight=strength)
-
-            elif model_name == "realesrgan":
-                restored_bgr, _ = model.enhance(face_bgr, outscale=1)
-
-            elif model_name == "faithdiff":
-                restored_rgb = model.restore(face_pil, strength)
-                restored_bgr = None
-
-            if restored_bgr is not None:
+                restored_bgr = (output.squeeze(0).permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
                 restored_rgb = cv2.cvtColor(restored_bgr, cv2.COLOR_BGR2RGB)
                 restored_pil = Image.fromarray(restored_rgb)
-            elif restored_rgb is not None:
-                restored_pil = Image.fromarray(restored_rgb) if isinstance(restored_rgb, np.ndarray) else restored_rgb
+
+            elif model_name == "gfpgan":
+                face_bgr = cv2.cvtColor(face_np, cv2.COLOR_RGB2BGR)
+                _, _, restored_bgr = model.enhance(face_bgr, has_aligned=True, paste_back=True, weight=strength)
+                restored_rgb = cv2.cvtColor(restored_bgr, cv2.COLOR_BGR2RGB)
+                restored_pil = Image.fromarray(restored_rgb)
+
+            elif model_name == "realesrgan":
+                face_bgr = cv2.cvtColor(face_np, cv2.COLOR_RGB2BGR)
+                restored_bgr, _ = model.enhance(face_bgr, outscale=1)
+                restored_rgb = cv2.cvtColor(restored_bgr, cv2.COLOR_BGR2RGB)
+                restored_pil = Image.fromarray(restored_rgb)
+
+            elif model_name == "faithdiff":
+                # FaithDiff returns PIL Image or ndarray
+                restored_result = model.restore(face_pil, strength)
+                if isinstance(restored_result, np.ndarray):
+                    restored_pil = Image.fromarray(restored_result.astype(np.uint8))
+                else:
+                    restored_pil = restored_result
             else:
                 return face_pil
+
+            # Ensure same size as input
+            if restored_pil.size != face_pil.size:
+                restored_pil = restored_pil.resize(face_pil.size, Image.Resampling.LANCZOS)
 
             # Blend with original based on strength
             if strength < 1.0:
@@ -232,6 +294,8 @@ class WD_FaceRestoreBlend:
 
         except Exception as e:
             print(f"[Face Restore & Blend] Enhancement error: {e}")
+            import traceback
+            traceback.print_exc()
             return face_pil
 
     def _match_color(self, source: np.ndarray, target: np.ndarray) -> np.ndarray:
