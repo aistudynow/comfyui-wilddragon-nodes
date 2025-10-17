@@ -38,8 +38,8 @@ class WD_PersonSelector:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING", "IMAGE")
-    RETURN_NAMES = ("IMAGES", "SELECTED_INDEX", "TOTAL_PEOPLE", "DETECTION_INFO", "PREVIEW_GRID")
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING", "IMAGE", "BBOX")
+    RETURN_NAMES = ("IMAGES", "SELECTED_INDEX", "TOTAL_PEOPLE", "DETECTION_INFO", "PREVIEW_GRID", "SELECTED_BBOX")
     FUNCTION = "execute"
     CATEGORY = "Wilddragon/Image"
 
@@ -185,19 +185,26 @@ class WD_PersonSelector:
         preview_grid = self._create_preview_grid(first_frame, detections, selected_index, preview_size)
         preview_tensor = _to_tensor(preview_grid).permute(1, 2, 0).unsqueeze(0)
 
-        # Print info
-        print(f"[Person Selector] Detected {total_people} people in frame")
-        print(f"[Person Selector] Selected: Person {selected_index}")
+        # Get selected person's bbox
+        selected_bbox = None
         if total_people > 0:
             selected_det = detections[selected_index]
+            selected_bbox = selected_det["bbox"]
+            print(f"[Person Selector] Detected {total_people} people in frame")
+            print(f"[Person Selector] Selected: Person {selected_index}")
             print(f"[Person Selector] Selected person confidence: {selected_det.get('score', 0.0):.3f}")
+            print(f"[Person Selector] Selected bbox: {selected_bbox}")
+        else:
+            selected_bbox = [0, 0, 0, 0]
+            print(f"[Person Selector] No people detected in frame")
 
         return (
             images,  # Pass through original images
             selected_index,  # Selected person index
             total_people,  # Total number of people detected
             json.dumps(detection_info, indent=2),  # Detection info as JSON
-            preview_tensor  # Preview grid image
+            preview_tensor,  # Preview grid image
+            [tuple(selected_bbox)]  # Selected person's bounding box for filtering
         )
 
 
